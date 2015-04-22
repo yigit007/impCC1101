@@ -149,14 +149,27 @@ class CC1101
     spiMode = false;
     cs_pin = null;
     so_pin = null;
-    rc_pin = null;
+    spi=null;
+    //rc_pin = null;
    
     spiSetup_flags = null;
     spiSetup_clock = null;
-    spi = hardware.spi189;          // <- gives an error
+    //spi = hardware.spi189;          // <- gives an error
    
-    constructor(spi, clock, chipselect)
+    constructor(spi_interface, clock, chipselect)
     {
+        if (spi_interface==SPI_189)
+        {
+            spi=hardware.spi189;
+        }
+        if (spi_interface==SPI_257)
+        {
+            spi=hardware.spi257;
+        }
+        if (spi_interface != SPI_189 && spi_interface != SPI_257)
+        {
+            Debug("Invalid SPI interface", ERROR);
+        }
         spiSetup_flags = 0;
         spiSetup_clock = clock;
         so_pin = hardware.pin9;     //why pin2 selected as SO
@@ -186,10 +199,11 @@ class CC1101
         so_pin.configure(DIGITAL_IN);
         spiMode = false;
     }
-    // Reset preparation
+    // Set SCLK and SI pins as Digital Output
+    // This is for manual POR specified in the datasheet
     function SelectResetConfig()
     {
-        hardware.pin1.configure(DIGITAL_OUT);
+        hardware.pin1.configure(DIGITAL_OUT); 
         hardware.pin8.configure(DIGITAL_OUT);
         spiMode = false;
     }
@@ -206,12 +220,14 @@ class CC1101
     // Reset the chip
     function Reset()
     {
-        // Manual POR sequence
-        DeselectChip();             // Deselect CC1101
+        // Manual reset sequence (page 51)
+        // (if auto POR is not achieved)
+        DeselectChip();             // Deselect CC1101 if selected
         SelectResetConfig();        // Use digital IO configuration
         hardware.pin1.write(1);     // Set SCLK 1
         hardware.pin8.write(0);     // Set SI 0
-        imp.sleep(0.000005);        
+        imp.sleep(0.000005);
+        // Strobe CS 
         SelectChip();               // Select C1101
         imp.sleep(0.000010);    
         DeselectChip();             // Deselect CC1101
@@ -219,9 +235,9 @@ class CC1101
         SelectChip();               // Select CC1101
         SelectDigitalRead();        
         WaitMiso();                 // Wait until MISO goes low
-        // XOSC Active Now
-        // Send SRES strobe 
-        SelectSPI();                // CS low
+        // XOSC stable
+        // Send SRES strobe over SPI
+        SelectSPI();                // Activate SPI peripheral
         local msg = blob(1);
         msg.writen(_SRES,'b');      // 8 bit unsigned blob
         spi.write(msg);             // Send reset strobe
@@ -237,42 +253,46 @@ class CC1101
     ///     regType - the register's type, can be STATUS_REG or CONFIG_REG
     function ReadReg(regAddr, regType)
     {
+        local blob = blob(1);
         local addr = regAddr | regType;
+        blob.writen(addr,'b');
         SelectDigitalRead();                        // Make SO to digital pin
         SelectChip();                               // Select CC1101
         WaitMiso();                                 // Wait until MISO goes low
         SelectSPI();                                // Go back to SPI mode
-        spi.write(format("%c",addr));   // Write the address
-        spi.read(1);                    // Get the value
-        spi.write(format("%c",0xFF));   // Write a dummy byte
-        local result = hardware.spi189.read(1);     // Get the actual value
+        local status = spi.writeread(blob);         // Write the address and get status
+        local result = spi.readblob(1);             // Read the result
         DeselectChip()                              // Deselect CC1101
         return result[0];
     }
    
     function Write(regAddr, data)
     {
+        local blob=blob(1);
+        local blob1=blob(1);
+        blob.writen(regAddr,'b');
+        blob1.writen(data,'b');
         SelectDigitalRead();                        // Make SO to digital pin
-        SelectChip()                                // Select CC1101
+        SelectChip();                               // Select CC1101
         WaitMiso();                                 // Wait until MISO goes low
         SelectSPI();                                // Go back to SPI mode
-        hardware.spi189.write(format("%c",regAddr));// Write the address
-        hardware.spi189.write(format("%c",data));   // Write the data
+        local status1 = spi.writeread(blob);        // Write the address
+        local status1 = spi.writeread(blob1);       // Write the data
         DeselectChip()                              // Deselect CC1101
+        // Do something with chip statuses
     }
    
     function WriteBurst(regAddr, data, count)
     {
-        local addr = regAddr | WRITE_BURST;
         SelectDigitalRead();                        // Make SO to digital pin
         SelectChip()                                // Select CC1101
         WaitMiso();                                 // Wait until MISO goes low
         SelectSPI();                                // Go back to SPI mode
-        hardware.spi189.write(format("%c",addr));   // Write the address
+        spi.write(format("%c",addr));               // Write the address
        
         foreach(b in data)                          // Write the data
         {
-            hardware.spi189.write(format("%c",b));
+            spi.write(format("%c",b));
         }
        
         DeselectChip()                              // Deselect CC1101
@@ -285,8 +305,7 @@ class CC1101
         SelectChip()                                // Select CC1101
         WaitMiso();                                 // Wait until MISO goes low
         SelectSPI();                                // Go back to SPI mode
-        hardware.spi189.write(format("%c",cmd));    // Write the command
-        local result = hardware.spi189.read(1);     // Get the chip status
+        local result = spi.writeread(format("%c",cmd));   // Write the command and get the chip status
         DeselectChip();                             // Deselect the chip
         server.log(result[0]);
     }
@@ -332,17 +351,14 @@ function Debug(msg, level)
     }
 }
  
-// Create RF interface
-imp.configure("CC1101 Example Code",[],[]);
- 
 // Get the version and the part number - verifies communication
-function VerifyComm(){return (rf1.ReadReg(_VERSION, STATUS_REG) == 0x04 && rf1.ReadReg(_PARTNUM, STATUS_REG) == 0x00);}
+function VerifyComm(){return (rf1.ReadReg(_VERSION, STATUS_REG) == 0x14 && rf1.ReadReg(_PARTNUM, STATUS_REG) == 0x00);}
  
 // Create the class
 rf1 <- CC1101(SPI_189, 120, hardware.pin7);
  
 // Clear the planner view
-server.show("");
+//server.show("");
  
 // Start communications
 if(VerifyComm())
